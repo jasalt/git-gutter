@@ -66,3 +66,37 @@
                 (should (= 3 (git-gutter-hunk-start-line
                               (car git-gutter:staged-diffinfos))))))))
       (delete-directory directory t))))
+
+(ert-deftest git-gutter:range-mapping-matches-line-reference ()
+  (dolist (diff '("@@ -2,0 +3,2 @@\n+x\n+y\n"
+                  "@@ -2,2 +1,0 @@\n-x\n-y\n"
+                  "@@ -2 +2 @@\n-x\n+y\n"
+                  "@@ -2,2 +2 @@\n-a\n-b\n+c\n@@ -8,0 +8,2 @@\n+x\n+y\n"))
+    (let ((unstaged (git-gutter-test:parse diff)))
+      (dotimes (start 12)
+        (dotimes (width 5)
+          (let* ((low (1+ start)) (high (+ low width))
+                 (staged (list (make-git-gutter-hunk :type 'modified
+                                                   :start-line low :end-line high)))
+                 (expected (cl-loop for line from low to high
+                                    for mapped = (git-gutter:map-index-line line unstaged)
+                                    when (and mapped (git-gutter:unchanged-line-p mapped unstaged))
+                                    collect mapped))
+                 (actual (cl-loop for info in (git-gutter:map-staged-hunks staged unstaged)
+                                  append (number-sequence (git-gutter-hunk-start-line info)
+                                                          (git-gutter-hunk-end-line info)))))
+            (should (equal expected actual))))))))
+
+(ert-deftest git-gutter:discard-superseded-staged-query ()
+  (with-temp-buffer
+    (let ((git-gutter-mode t)
+          (git-gutter:show-staged-changes t)
+          (git-gutter:vcs-type 'git)
+          stale done)
+      (git-gutter:collect-staged-changes "missing-file" nil (lambda () (setq stale t)))
+      (git-gutter:collect-staged-changes "missing-file" nil (lambda () (setq done t)))
+      (let ((deadline (+ (float-time) 5)))
+        (while (and (not done) (< (float-time) deadline))
+          (accept-process-output nil 0.05)))
+      (should done)
+      (should-not stale))))

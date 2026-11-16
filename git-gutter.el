@@ -251,6 +251,9 @@ continue to operate exclusively on unstaged changes."
   :group 'git-gutter)
 
 (defvar-local git-gutter:staged-diffinfos nil)
+(defvar-local git-gutter:staged-process nil)
+(defvar-local git-gutter:staged-generation 0)
+(defvar git-gutter:staged-sign-cache nil)
 (defvar git-gutter:rendering-staged nil)
 (defvar git-gutter:rendering-combined nil)
 
@@ -459,19 +462,26 @@ Argument TEST is the case before BODY execution."
                  (setq offset (+ offset (- new old))))))))
     (unless replaced (max 1 (+ line offset)))))
 
+(require 'git-gutter-staged)
+
 (defun git-gutter:collect-staged-changes (file diffinfos callback)
   "Collect staged changes for FILE, then call CALLBACK in the source buffer."
+  (cl-incf git-gutter:staged-generation)
+  (when (process-live-p git-gutter:staged-process)
+    (delete-process git-gutter:staged-process))
   (setq git-gutter:staged-diffinfos nil)
   (if (not (and git-gutter:show-staged-changes
                 (eq git-gutter:vcs-type 'git)
                 (not (git-gutter:revision-set-p))))
       (funcall callback)
     (let* ((source (current-buffer))
+           (generation git-gutter:staged-generation)
            (output (generate-new-buffer " *git-gutter-staged*"))
            (process (start-file-process
                      "git-gutter-staged" output "git" "--no-pager" "diff"
                      "--cached" "--no-color" "--no-ext-diff" "--relative"
                      "-U0" "--" file)))
+      (setq git-gutter:staged-process process)
       (set-process-query-on-exit-flag process nil)
       (set-process-sentinel
        process
@@ -479,20 +489,13 @@ Argument TEST is the case before BODY execution."
          (when (memq (process-status proc) '(exit signal))
            (unwind-protect
                (when (and (buffer-live-p source)
-                          (buffer-local-value 'git-gutter-mode source))
+                          (buffer-local-value 'git-gutter-mode source)
+                          (= generation (buffer-local-value 'git-gutter:staged-generation source)))
                  (let ((staged (when (zerop (process-exit-status proc))
                                  (git-gutter:process-diff-output output))))
                    (with-current-buffer source
                      (setq git-gutter:staged-diffinfos
-                           (cl-loop for info in staged append
-                                    (cl-loop for line from (git-gutter-hunk-start-line info)
-                                             to (git-gutter-hunk-end-line info)
-                                             for mapped = (git-gutter:map-index-line line diffinfos)
-                                             when (and mapped
-                                                       (git-gutter:unchanged-line-p mapped diffinfos))
-                                             collect (make-git-gutter-hunk
-                                                      :type (git-gutter-hunk-type info)
-                                                      :start-line mapped :end-line mapped))))
+                           (git-gutter:map-staged-hunks staged diffinfos))
                      (funcall callback))))
              (kill-buffer output))))))))
 
@@ -627,6 +630,9 @@ Argument TEST is the case before BODY execution."
   (concat " *git-gutter-" curfile "-*"))
 
 (defun git-gutter:kill-buffer-hook ()
+  (cl-incf git-gutter:staged-generation)
+  (when (process-live-p git-gutter:staged-process)
+    (delete-process git-gutter:staged-process))
   (let ((buf (git-gutter:diff-process-buffer (git-gutter:base-file))))
     (git-gutter:awhen (get-buffer buf)
       (kill-buffer it))))
@@ -715,6 +721,9 @@ Argument TEST is the case before BODY execution."
     (dolist (hook git-gutter:update-hooks)
       (remove-hook hook 'git-gutter t))
     (git-gutter:clear-gutter)
+    (cl-incf git-gutter:staged-generation)
+    (when (process-live-p git-gutter:staged-process)
+      (delete-process git-gutter:staged-process))
     (setq git-gutter:staged-diffinfos nil)))
 
 (defun git-gutter--turn-on ()
@@ -749,7 +758,12 @@ Argument TEST is the case before BODY execution."
              for start-line = (git-gutter-hunk-start-line info)
              for end-line = (git-gutter-hunk-end-line info)
              for type = (git-gutter-hunk-type info)
-             for sign = (git-gutter:propertized-sign type)
+             for sign = (if git-gutter:rendering-staged
+                            (or (cdr (assq type git-gutter:staged-sign-cache))
+                                (let ((value (git-gutter:propertized-sign type)))
+                                  (push (cons type value) git-gutter:staged-sign-cache)
+                                  value))
+                          (git-gutter:propertized-sign type))
              for points = nil
              do
              (let ((bound (progn
@@ -773,7 +787,8 @@ Argument TEST is the case before BODY execution."
       (when (or git-gutter:unchanged-sign git-gutter:separator-sign)
         (git-gutter:view-for-unchanged all))
       (let ((git-gutter:rendering-combined t))
-        (let ((git-gutter:rendering-staged t))
+        (let ((git-gutter:rendering-staged t)
+              (git-gutter:staged-sign-cache nil))
           (git-gutter:view-set-overlays git-gutter:staged-diffinfos))
         (git-gutter:view-set-overlays diffinfos)))
     (git-gutter:show-gutter all)))
