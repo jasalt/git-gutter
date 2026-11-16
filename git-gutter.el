@@ -552,10 +552,22 @@ Index line N in a span is worktree line N + SHIFT, which has no unstaged sign."
                      face 'git-gutter:deleted)))
     (when staged
       (setq face (intern (format "git-gutter:staged-%s" type)))
-      (let ((foreground (face-foreground face nil t)))
-        (when (and foreground (color-defined-p foreground))
-          (setq face `(:inherit ,face :foreground
-                       ,(color-lighten-name foreground 45))))))
+      ;; Themes color signs by foreground (default) or background (Modus).
+      ;; Fade both halfway toward the editor background.
+      (let ((lighter (list :inherit face))
+            (base (color-name-to-rgb
+                   (let ((bg (face-background 'default nil t)))
+                     (if (and bg (color-defined-p bg)) bg "white")))))
+        (dolist (attribute '(:foreground :background))
+          (let ((color (face-attribute face attribute nil t)))
+            (when (and (stringp color) (color-defined-p color))
+              (setq lighter
+                    (plist-put lighter attribute
+                               (apply #'color-rgb-to-hex
+                                      (append (color-blend (color-name-to-rgb color)
+                                                           base 0.5)
+                                              '(2))))))))
+        (setq face lighter)))
     (when (get-text-property 0 'face sign)
       (setq face (append
                   (get-text-property 0 'face sign)

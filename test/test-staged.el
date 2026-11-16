@@ -99,3 +99,14 @@
           (accept-process-output nil 0.05)))
       (should done)
       (should-not stale))))
+
+(ert-deftest git-gutter:staged-sign-lightens-background ()
+  "Themes such as Modus color signs with a background."
+  (let ((spec (get 'git-gutter:added 'face-defface-spec)))
+    (unwind-protect
+        (progn
+          (face-spec-set 'git-gutter:added '((t (:background "#6cc06c"))))
+          (let ((face (get-text-property 0 'face (git-gutter:propertized-sign 'added t))))
+            (should (stringp (plist-get face :background)))
+            (should-not (equal (plist-get face :background) "#6cc06c"))))
+      (face-spec-set 'git-gutter:added spec))))

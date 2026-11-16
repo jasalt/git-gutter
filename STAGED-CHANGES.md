@@ -4,8 +4,9 @@ Enable `(setq git-gutter:show-staged-changes t)` to show index changes alongside
 unstaged changes. This is disabled by default and only applies to Git with no
 custom start revision.
 
-Staged signs use the normal signs with 45% lighter foreground colors, inherited
-from `git-gutter:staged-added`, `git-gutter:staged-modified`, and
+Staged signs use the normal signs, faded halfway toward the editor background.
+Both foreground and background colors are faded, since some themes (such as
+Modus) color signs by background. Faces inherit from `git-gutter:staged-added`, `git-gutter:staged-modified`, and
 `git-gutter:staged-deleted`. Colors are resolved at rendering time so theme
 changes are respected on refresh.
 
