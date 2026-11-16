@@ -237,6 +237,15 @@ continue to operate exclusively on unstaged changes."
   :type 'boolean
   :group 'git-gutter)
 
+(defcustom git-gutter:staged-background-opacity 0.25
+  "Amount of the original background color retained in staged signs.
+Zero uses the editor background; one keeps the original color.
+Explicit background colors on staged faces are used unchanged."
+  :type '(restricted-sexp :match-alternatives
+                          ((lambda (value)
+                             (and (numberp value) (<= 0 value 1)))))
+  :group 'git-gutter)
+
 (defface git-gutter:staged-added
   '((t (:inherit git-gutter:added)))
   "Base face for staged additions."
@@ -540,6 +549,22 @@ Index line N in a span is worktree line N + SHIFT, which has no unstaged sign."
   (let ((gutter-sep (concat sign (git-gutter:gutter-seperator))))
     (propertize " " 'display `((margin left-margin) ,gutter-sep))))
 
+(defun git-gutter:staged-sign-face (type)
+  "Return the face for staged TYPE, fading only its inherited background."
+  (let* ((face (intern (format "git-gutter:staged-%s" type)))
+         (color (face-background face nil t))
+         (base (face-background 'default nil t)))
+    (if (or (stringp (face-attribute face :background))
+            (not (and (stringp color) (color-defined-p color))))
+        face
+      (unless (and base (color-defined-p base))
+        (setq base "white"))
+      (let ((rgb (color-blend (color-name-to-rgb color)
+                              (color-name-to-rgb base)
+                              git-gutter:staged-background-opacity)))
+        (list :inherit face :background
+              (apply #'color-rgb-to-hex (append rgb '(2))))))))
+
 (defun git-gutter:propertized-sign (type &optional staged)
   "Return the sign for TYPE, lighter when STAGED."
   (let (sign face)
@@ -551,23 +576,7 @@ Index line N in a span is worktree line N + SHIFT, which has no unstaged sign."
       (deleted (setq sign git-gutter:deleted-sign
                      face 'git-gutter:deleted)))
     (when staged
-      (setq face (intern (format "git-gutter:staged-%s" type)))
-      ;; Fade the background 75% toward the editor background, unless the
-      ;; staged face sets its own.  Letters keep the staged face's color.
-      (let ((color (face-background face nil t))
-            (base (face-background 'default nil t)))
-        (when (and (stringp color) (color-defined-p color)
-                   (not (stringp (face-attribute face :background))))
-          (setq face
-                (list :inherit face
-                      :background
-                      (apply #'color-rgb-to-hex
-                             (append (color-blend
-                                      (color-name-to-rgb color)
-                                      (color-name-to-rgb
-                                       (if (and base (color-defined-p base)) base "white"))
-                                      0.25)
-                                     '(2))))))))
+      (setq face (git-gutter:staged-sign-face type)))
     (when (get-text-property 0 'face sign)
       (setq face (append
                   (get-text-property 0 'face sign)
