@@ -17,6 +17,6 @@ navigation, staging, reverting, marking, and popups still use unstaged hunks.
 Run tests with:
 
 ```sh
-emacs --batch -Q -L . -l test/test-git-gutter.el -l test/test-staged.el \
+emacs --batch -Q -L . -L test -l test/test-git-gutter.el -l test/test-staged.el \
   -f ert-run-tests-batch-and-exit
 ```

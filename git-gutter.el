@@ -252,10 +252,10 @@ continue to operate exclusively on unstaged changes."
 
 (defvar-local git-gutter:staged-diffinfos nil)
 (defvar-local git-gutter:staged-process nil)
-(defvar-local git-gutter:staged-generation 0)
-(defvar git-gutter:staged-sign-cache nil)
-(defvar git-gutter:rendering-staged nil)
-(defvar git-gutter:rendering-combined nil)
+
+(defconst git-gutter:hunk-header-regexp
+  "^@@ -\\([0-9]+\\)\\(?:,\\([0-9]+\\)\\)? \\+[0-9]+\\(?:,\\([0-9]+\\)\\)? @@"
+  "Match old start, old count, and new count in a hunk header.")
 
 (defvar git-gutter:popup-buffer "*git-gutter:diff*")
 (defvar git-gutter:ignore-commands
@@ -444,38 +444,71 @@ Argument TEST is the case before BODY execution."
                   (setq git-gutter:enabled t)))))
            (kill-buffer proc-buf)))))))
 
-(defun git-gutter:map-index-line (line diffinfos)
-  "Map index LINE through unstaged DIFFINFOS, or return nil if replaced."
-  (let ((offset 0) replaced)
-    (dolist (info diffinfos)
-      (when (string-match
-             "^@@ -\\([0-9]+\\)\\(?:,\\([0-9]+\\)\\)? +\\+[0-9]+\\(?:,\\([0-9]+\\)\\)? @@"
-             (git-gutter-hunk-content info))
-        (let* ((start (string-to-number (match-string 1 (git-gutter-hunk-content info))))
-               (old (if (match-string 2 (git-gutter-hunk-content info))
-                        (string-to-number (match-string 2 (git-gutter-hunk-content info))) 1))
-               (new (if (match-string 3 (git-gutter-hunk-content info))
-                        (string-to-number (match-string 3 (git-gutter-hunk-content info))) 1)))
-          (cond ((and (> old 0) (>= line start) (< line (+ start old)))
-                 (setq replaced t))
-                ((if (zerop old) (> line start) (>= line (+ start old)))
-                 (setq offset (+ offset (- new old))))))))
-    (unless replaced (max 1 (+ line offset)))))
+(defun git-gutter:unchanged-index-spans (unstaged)
+  "Return ordered (LOW HIGH SHIFT) index spans left unchanged by UNSTAGED.
+Index line N in a span is worktree line N + SHIFT, which has no unstaged sign."
+  (let ((cursor 1) (shift 0) (occupied unstaged) spans)
+    (cl-flet ((add (low high)
+                ;; Skip worktree lines with unstaged signs, e.g. deletion anchors.
+                (let ((first (+ low shift)) (last (+ high shift)))
+                  (while (and occupied
+                              (< (git-gutter-hunk-end-line (car occupied)) first))
+                    (pop occupied))
+                  (cl-loop for hunk in occupied
+                           for start = (git-gutter-hunk-start-line hunk)
+                           while (<= start last)
+                           do (when (< first start)
+                                (push (list (- first shift) (- start shift 1) shift)
+                                      spans))
+                           (setq first (max first (1+ (git-gutter-hunk-end-line hunk)))))
+                  (when (<= first last)
+                    (push (list (- first shift) (- last shift) shift) spans)))))
+      (dolist (hunk unstaged)
+        (let ((header (git-gutter-hunk-content hunk)))
+          (when (string-match git-gutter:hunk-header-regexp header)
+            (cl-flet ((num (n) (if (match-string n header)
+                                   (string-to-number (match-string n header))
+                                 1)))
+              (let* ((start (num 1)) (old (num 2)) (new (num 3))
+                     (next (if (zerop old) (1+ start) start)))
+                (add cursor (1- next))
+                (setq cursor (+ next old)
+                      shift (+ shift (- new old))))))))
+      (add cursor most-positive-fixnum))
+    (nreverse spans)))
 
-(require 'git-gutter-staged)
+(defun git-gutter:map-staged-hunks (staged unstaged)
+  "Map ordered STAGED index ranges to worktree lines without UNSTAGED signs."
+  (let ((spans (git-gutter:unchanged-index-spans unstaged)) result)
+    (dolist (hunk staged (nreverse result))
+      (let ((start (git-gutter-hunk-start-line hunk))
+            (end (git-gutter-hunk-end-line hunk)))
+        (while (and spans (< (nth 1 (car spans)) start))
+          (pop spans))
+        (cl-loop for (low high shift) in spans
+                 while (<= low end)
+                 do (push (make-git-gutter-hunk
+                           :type (git-gutter-hunk-type hunk)
+                           :start-line (+ (max start low) shift)
+                           :end-line (+ (min end high) shift))
+                          result))))))
+
+(defun git-gutter:cancel-staged-query ()
+  "Stop the current staged diff and ignore its result."
+  (let ((process git-gutter:staged-process))
+    (setq git-gutter:staged-process nil)
+    (when (process-live-p process)
+      (delete-process process))))
 
 (defun git-gutter:collect-staged-changes (file diffinfos callback)
   "Collect staged changes for FILE, then call CALLBACK in the source buffer."
-  (cl-incf git-gutter:staged-generation)
-  (when (process-live-p git-gutter:staged-process)
-    (delete-process git-gutter:staged-process))
+  (git-gutter:cancel-staged-query)
   (setq git-gutter:staged-diffinfos nil)
   (if (not (and git-gutter:show-staged-changes
                 (eq git-gutter:vcs-type 'git)
                 (not (git-gutter:revision-set-p))))
       (funcall callback)
     (let* ((source (current-buffer))
-           (generation git-gutter:staged-generation)
            (output (generate-new-buffer " *git-gutter-staged*"))
            (process (start-file-process
                      "git-gutter-staged" output "git" "--no-pager" "diff"
@@ -489,12 +522,12 @@ Argument TEST is the case before BODY execution."
          (when (memq (process-status proc) '(exit signal))
            (unwind-protect
                (when (and (buffer-live-p source)
-                          (buffer-local-value 'git-gutter-mode source)
-                          (= generation (buffer-local-value 'git-gutter:staged-generation source)))
+                          (eq proc (buffer-local-value 'git-gutter:staged-process source)))
                  (let ((staged (when (zerop (process-exit-status proc))
                                  (git-gutter:process-diff-output output))))
                    (with-current-buffer source
-                     (setq git-gutter:staged-diffinfos
+                     (setq git-gutter:staged-process nil
+                           git-gutter:staged-diffinfos
                            (git-gutter:map-staged-hunks staged diffinfos))
                      (funcall callback))))
              (kill-buffer output))))))))
@@ -507,7 +540,8 @@ Argument TEST is the case before BODY execution."
   (let ((gutter-sep (concat sign (git-gutter:gutter-seperator))))
     (propertize " " 'display `((margin left-margin) ,gutter-sep))))
 
-(defun git-gutter:propertized-sign (type)
+(defun git-gutter:propertized-sign (type &optional staged)
+  "Return the sign for TYPE, lighter when STAGED."
   (let (sign face)
     (cl-case type
       (added (setq sign git-gutter:added-sign
@@ -516,7 +550,7 @@ Argument TEST is the case before BODY execution."
                       face 'git-gutter:modified))
       (deleted (setq sign git-gutter:deleted-sign
                      face 'git-gutter:deleted)))
-    (when git-gutter:rendering-staged
+    (when staged
       (setq face (intern (format "git-gutter:staged-%s" type)))
       (let ((foreground (face-foreground face nil t)))
         (when (and foreground (color-defined-p foreground))
@@ -630,9 +664,7 @@ Argument TEST is the case before BODY execution."
   (concat " *git-gutter-" curfile "-*"))
 
 (defun git-gutter:kill-buffer-hook ()
-  (cl-incf git-gutter:staged-generation)
-  (when (process-live-p git-gutter:staged-process)
-    (delete-process git-gutter:staged-process))
+  (git-gutter:cancel-staged-query)
   (let ((buf (git-gutter:diff-process-buffer (git-gutter:base-file))))
     (git-gutter:awhen (get-buffer buf)
       (kill-buffer it))))
@@ -656,6 +688,8 @@ Argument TEST is the case before BODY execution."
   (let ((linum-width (car (window-margins))))
     (when linum-width
       (git-gutter:linum-prepend-spaces)
+      (when (or git-gutter:unchanged-sign git-gutter:separator-sign)
+        (git-gutter:view-for-unchanged diffinfos))
       (git-gutter:view-set-overlays diffinfos)
       (let ((curwin (get-buffer-window))
             (margin (+ linum-width (git-gutter:window-margin))))
@@ -721,9 +755,7 @@ Argument TEST is the case before BODY execution."
     (dolist (hook git-gutter:update-hooks)
       (remove-hook hook 'git-gutter t))
     (git-gutter:clear-gutter)
-    (cl-incf git-gutter:staged-generation)
-    (when (process-live-p git-gutter:staged-process)
-      (delete-process git-gutter:staged-process))
+    (git-gutter:cancel-staged-query)
     (setq git-gutter:staged-diffinfos nil)))
 
 (defun git-gutter--turn-on ()
@@ -743,13 +775,14 @@ Argument TEST is the case before BODY execution."
   (when (git-gutter:show-gutter-p diffinfos)
     (git-gutter:set-window-margin (git-gutter:window-margin))))
 
-(defun git-gutter:view-set-overlays (diffinfos)
-  (when (and (not git-gutter:rendering-combined)
-             (or git-gutter:unchanged-sign git-gutter:separator-sign))
-    (git-gutter:view-for-unchanged diffinfos))
+(defun git-gutter:view-set-overlays (diffinfos &optional staged)
+  "Put signs for DIFFINFOS; STAGED selects lighter signs."
   (save-excursion
     (goto-char (point-min))
-    (cl-loop with curline = 1
+    (cl-loop with signs = (mapcar (lambda (type)
+                                    (cons type (git-gutter:propertized-sign type staged)))
+                                  '(added modified deleted))
+             with curline = 1
              with move-fn = (if git-gutter:visual-line
                                 #'git-gutter:next-visual-line
                               #'forward-line)
@@ -758,12 +791,7 @@ Argument TEST is the case before BODY execution."
              for start-line = (git-gutter-hunk-start-line info)
              for end-line = (git-gutter-hunk-end-line info)
              for type = (git-gutter-hunk-type info)
-             for sign = (if git-gutter:rendering-staged
-                            (or (cdr (assq type git-gutter:staged-sign-cache))
-                                (let ((value (git-gutter:propertized-sign type)))
-                                  (push (cons type value) git-gutter:staged-sign-cache)
-                                  value))
-                          (git-gutter:propertized-sign type))
+             for sign = (cdr (assq type signs))
              for points = nil
              do
              (let ((bound (progn
@@ -786,11 +814,8 @@ Argument TEST is the case before BODY execution."
     (when (or all git-gutter:always-show-separator)
       (when (or git-gutter:unchanged-sign git-gutter:separator-sign)
         (git-gutter:view-for-unchanged all))
-      (let ((git-gutter:rendering-combined t))
-        (let ((git-gutter:rendering-staged t)
-              (git-gutter:staged-sign-cache nil))
-          (git-gutter:view-set-overlays git-gutter:staged-diffinfos))
-        (git-gutter:view-set-overlays diffinfos)))
+      (git-gutter:view-set-overlays git-gutter:staged-diffinfos t)
+      (git-gutter:view-set-overlays diffinfos))
     (git-gutter:show-gutter all)))
 
 (defsubst git-gutter:reset-window-margin-p ()

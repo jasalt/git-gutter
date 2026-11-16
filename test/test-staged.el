@@ -1,23 +1,24 @@
 ;;; test-staged.el --- Staged sign tests -*- lexical-binding: t; -*-
 (require 'ert)
 (require 'git-gutter)
+(require 'staged-reference)
 
 (defun git-gutter-test:parse (text)
   (with-temp-buffer
     (insert text)
     (git-gutter:process-diff-output (current-buffer))))
 
-(ert-deftest git-gutter:map-index-lines ()
+(ert-deftest git-gutter-test:map-index-lines ()
   (let ((inserted (git-gutter-test:parse "@@ -2,0 +3,2 @@\n+x\n+y\n"))
         (deleted (git-gutter-test:parse "@@ -2,2 +1,0 @@\n-x\n-y\n"))
         (replaced (git-gutter-test:parse "@@ -2 +2 @@\n-x\n+y\n")))
-    (should (= 2 (git-gutter:map-index-line 2 inserted)))
-    (should (= 5 (git-gutter:map-index-line 3 inserted)))
-    (should-not (git-gutter:map-index-line 2 deleted))
-    (should-not (git-gutter:map-index-line 3 deleted))
-    (should (= 2 (git-gutter:map-index-line 4 deleted)))
-    (should-not (git-gutter:map-index-line 2 replaced))
-    (should (= 3 (git-gutter:map-index-line 3 replaced)))))
+    (should (= 2 (git-gutter-test:map-index-line 2 inserted)))
+    (should (= 5 (git-gutter-test:map-index-line 3 inserted)))
+    (should-not (git-gutter-test:map-index-line 2 deleted))
+    (should-not (git-gutter-test:map-index-line 3 deleted))
+    (should (= 2 (git-gutter-test:map-index-line 4 deleted)))
+    (should-not (git-gutter-test:map-index-line 2 replaced))
+    (should (= 3 (git-gutter-test:map-index-line 3 replaced)))))
 
 (ert-deftest git-gutter:staged-rendering ()
   (with-temp-buffer
@@ -78,10 +79,8 @@
           (let* ((low (1+ start)) (high (+ low width))
                  (staged (list (make-git-gutter-hunk :type 'modified
                                                    :start-line low :end-line high)))
-                 (expected (cl-loop for line from low to high
-                                    for mapped = (git-gutter:map-index-line line unstaged)
-                                    when (and mapped (git-gutter:unchanged-line-p mapped unstaged))
-                                    collect mapped))
+                 (expected (mapcar #'git-gutter-hunk-start-line
+                                   (git-gutter-test:map-staged-lines staged unstaged)))
                  (actual (cl-loop for info in (git-gutter:map-staged-hunks staged unstaged)
                                   append (number-sequence (git-gutter-hunk-start-line info)
                                                           (git-gutter-hunk-end-line info)))))

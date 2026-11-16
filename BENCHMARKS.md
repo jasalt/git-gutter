@@ -3,7 +3,7 @@
 Run from the fork root:
 
 ```sh
-emacs --batch -Q -L . -l test/benchmark-staged.el
+emacs --batch -Q -L . -L test -l test/benchmark-staged.el
 ```
 
 Measured locally with interpreted Elisp in fresh batch Emacs processes. Each
@@ -29,10 +29,12 @@ Changes:
 - Remove occupied worktree lines, then intersect staged ranges with intervals.
 - Cache each staged sign/color once per rendering pass; theme changes remain
   visible on the next refresh.
-- Cancel superseded staged queries and reject results with stale generations.
+- Cancel superseded staged queries; only the current process may publish results.
 - Cancel staged queries when their source buffer is killed or mode is disabled.
 
 Remaining costs: one additional asynchronous Git process per refresh, one
 margin overlay per displayed line, and normal redisplay. No staged-diff cache is
-used, avoiding index invalidation issues after external staging. The benchmark
-keeps the original per-line mapper as a reference for before/after comparison.
+used, avoiding index invalidation issues after external staging. The test-only
+per-line mapper in `test/staged-reference.el` is the correctness reference.
+The table records the original before/after run; its reference timing is not
+comparable because the reference now runs as interpreted test code.
