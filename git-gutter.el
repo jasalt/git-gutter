@@ -31,6 +31,7 @@
 ;;; Code:
 
 (require 'cl-lib)
+(require 'color)
 
 (defgroup git-gutter nil
   "Port GitGutter"
@@ -229,6 +230,30 @@ Can be a directory-local variable in your project.")
 (defvar git-gutter:update-timer nil)
 (defvar-local git-gutter:last-chars-modified-tick nil)
 
+(defcustom git-gutter:show-staged-changes nil
+  "Show staged Git changes with lighter signs beneath unstaged changes.
+Only applies when `git-gutter:start-revision' is unset.  Hunk commands
+continue to operate exclusively on unstaged changes."
+  :type 'boolean
+  :group 'git-gutter)
+
+(defface git-gutter:staged-added
+  '((t (:inherit git-gutter:added)))
+  "Base face for staged additions."
+  :group 'git-gutter)
+(defface git-gutter:staged-modified
+  '((t (:inherit git-gutter:modified)))
+  "Base face for staged modifications."
+  :group 'git-gutter)
+(defface git-gutter:staged-deleted
+  '((t (:inherit git-gutter:deleted)))
+  "Base face for staged deletions."
+  :group 'git-gutter)
+
+(defvar-local git-gutter:staged-diffinfos nil)
+(defvar git-gutter:rendering-staged nil)
+(defvar git-gutter:rendering-combined nil)
+
 (defvar git-gutter:popup-buffer "*git-gutter:diff*")
 (defvar git-gutter:ignore-commands
   '(minibuffer-complete-and-exit
@@ -407,11 +432,69 @@ Argument TEST is the case before BODY execution."
          (let ((diffinfos (git-gutter:process-diff-output (process-buffer proc))))
            (when (buffer-live-p curbuf)
              (with-current-buffer curbuf
-               (git-gutter:update-diffinfo diffinfos)
-               (when git-gutter:has-indirect-buffers
-                 (git-gutter:update-indirect-buffers file))
-               (setq git-gutter:enabled t)))
+               (git-gutter:collect-staged-changes
+                curfile diffinfos
+                (lambda ()
+                  (git-gutter:update-diffinfo diffinfos)
+                  (when git-gutter:has-indirect-buffers
+                    (git-gutter:update-indirect-buffers file))
+                  (setq git-gutter:enabled t)))))
            (kill-buffer proc-buf)))))))
+
+(defun git-gutter:map-index-line (line diffinfos)
+  "Map index LINE through unstaged DIFFINFOS, or return nil if replaced."
+  (let ((offset 0) replaced)
+    (dolist (info diffinfos)
+      (when (string-match
+             "^@@ -\\([0-9]+\\)\\(?:,\\([0-9]+\\)\\)? +\\+[0-9]+\\(?:,\\([0-9]+\\)\\)? @@"
+             (git-gutter-hunk-content info))
+        (let* ((start (string-to-number (match-string 1 (git-gutter-hunk-content info))))
+               (old (if (match-string 2 (git-gutter-hunk-content info))
+                        (string-to-number (match-string 2 (git-gutter-hunk-content info))) 1))
+               (new (if (match-string 3 (git-gutter-hunk-content info))
+                        (string-to-number (match-string 3 (git-gutter-hunk-content info))) 1)))
+          (cond ((and (> old 0) (>= line start) (< line (+ start old)))
+                 (setq replaced t))
+                ((if (zerop old) (> line start) (>= line (+ start old)))
+                 (setq offset (+ offset (- new old))))))))
+    (unless replaced (max 1 (+ line offset)))))
+
+(defun git-gutter:collect-staged-changes (file diffinfos callback)
+  "Collect staged changes for FILE, then call CALLBACK in the source buffer."
+  (setq git-gutter:staged-diffinfos nil)
+  (if (not (and git-gutter:show-staged-changes
+                (eq git-gutter:vcs-type 'git)
+                (not (git-gutter:revision-set-p))))
+      (funcall callback)
+    (let* ((source (current-buffer))
+           (output (generate-new-buffer " *git-gutter-staged*"))
+           (process (start-file-process
+                     "git-gutter-staged" output "git" "--no-pager" "diff"
+                     "--cached" "--no-color" "--no-ext-diff" "--relative"
+                     "-U0" "--" file)))
+      (set-process-query-on-exit-flag process nil)
+      (set-process-sentinel
+       process
+       (lambda (proc _event)
+         (when (memq (process-status proc) '(exit signal))
+           (unwind-protect
+               (when (and (buffer-live-p source)
+                          (buffer-local-value 'git-gutter-mode source))
+                 (let ((staged (when (zerop (process-exit-status proc))
+                                 (git-gutter:process-diff-output output))))
+                   (with-current-buffer source
+                     (setq git-gutter:staged-diffinfos
+                           (cl-loop for info in staged append
+                                    (cl-loop for line from (git-gutter-hunk-start-line info)
+                                             to (git-gutter-hunk-end-line info)
+                                             for mapped = (git-gutter:map-index-line line diffinfos)
+                                             when (and mapped
+                                                       (git-gutter:unchanged-line-p mapped diffinfos))
+                                             collect (make-git-gutter-hunk
+                                                      :type (git-gutter-hunk-type info)
+                                                      :start-line mapped :end-line mapped))))
+                     (funcall callback))))
+             (kill-buffer output))))))))
 
 (defsubst git-gutter:gutter-seperator ()
   (when git-gutter:separator-sign
@@ -430,6 +513,12 @@ Argument TEST is the case before BODY execution."
                       face 'git-gutter:modified))
       (deleted (setq sign git-gutter:deleted-sign
                      face 'git-gutter:deleted)))
+    (when git-gutter:rendering-staged
+      (setq face (intern (format "git-gutter:staged-%s" type)))
+      (let ((foreground (face-foreground face nil t)))
+        (when (and foreground (color-defined-p foreground))
+          (setq face `(:inherit ,face :foreground
+                       ,(color-lighten-name foreground 45))))))
     (when (get-text-property 0 'face sign)
       (setq face (append
                   (get-text-property 0 'face sign)
@@ -625,7 +714,8 @@ Argument TEST is the case before BODY execution."
     (remove-hook 'post-command-hook 'git-gutter:post-command-hook t)
     (dolist (hook git-gutter:update-hooks)
       (remove-hook hook 'git-gutter t))
-    (git-gutter:clear-gutter)))
+    (git-gutter:clear-gutter)
+    (setq git-gutter:staged-diffinfos nil)))
 
 (defun git-gutter--turn-on ()
   (when (and (buffer-file-name)
@@ -645,7 +735,8 @@ Argument TEST is the case before BODY execution."
     (git-gutter:set-window-margin (git-gutter:window-margin))))
 
 (defun git-gutter:view-set-overlays (diffinfos)
-  (when (or git-gutter:unchanged-sign git-gutter:separator-sign)
+  (when (and (not git-gutter:rendering-combined)
+             (or git-gutter:unchanged-sign git-gutter:separator-sign))
     (git-gutter:view-for-unchanged diffinfos))
   (save-excursion
     (goto-char (point-min))
@@ -677,9 +768,15 @@ Argument TEST is the case before BODY execution."
                (setq curline (1+ end-line))))))
 
 (defun git-gutter:view-diff-infos (diffinfos)
-  (when (or diffinfos git-gutter:always-show-separator)
-    (git-gutter:view-set-overlays diffinfos))
-  (git-gutter:show-gutter diffinfos))
+  (let ((all (append git-gutter:staged-diffinfos diffinfos)))
+    (when (or all git-gutter:always-show-separator)
+      (when (or git-gutter:unchanged-sign git-gutter:separator-sign)
+        (git-gutter:view-for-unchanged all))
+      (let ((git-gutter:rendering-combined t))
+        (let ((git-gutter:rendering-staged t))
+          (git-gutter:view-set-overlays git-gutter:staged-diffinfos))
+        (git-gutter:view-set-overlays diffinfos)))
+    (git-gutter:show-gutter all)))
 
 (defsubst git-gutter:reset-window-margin-p ()
   (or git-gutter:hide-gutter (not global-git-gutter-mode)))
@@ -931,12 +1028,14 @@ Argument TEST is the case before BODY execution."
 
 (defun git-gutter:update-indirect-buffers (orig-file)
   (cl-loop with diffinfos = git-gutter:diffinfos
+           with staged = git-gutter:staged-diffinfos
            for win in (window-list)
            for buf  = (window-buffer win)
            for base = (buffer-base-buffer buf)
            when (and base (string= (buffer-file-name base) orig-file))
            do
            (with-current-buffer buf
+             (setq git-gutter:staged-diffinfos staged)
              (git-gutter:update-diffinfo diffinfos))))
 
 ;;;###autoload
@@ -1096,8 +1195,11 @@ start revision."
            (let ((diffinfos (git-gutter:process-diff-output (process-buffer proc))))
              (when (buffer-live-p curbuf)
                (with-current-buffer curbuf
-                 (git-gutter:update-diffinfo diffinfos)
-                 (setq git-gutter:enabled t)))
+                 (git-gutter:collect-staged-changes
+                  (file-name-nondirectory (git-gutter:base-file)) diffinfos
+                  (lambda ()
+                    (git-gutter:update-diffinfo diffinfos)
+                    (setq git-gutter:enabled t)))))
              (kill-buffer proc-buf)
              (delete-file original)
              (delete-file now))))))))
