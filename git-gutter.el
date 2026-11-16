@@ -552,22 +552,22 @@ Index line N in a span is worktree line N + SHIFT, which has no unstaged sign."
                      face 'git-gutter:deleted)))
     (when staged
       (setq face (intern (format "git-gutter:staged-%s" type)))
-      ;; Themes color signs by foreground (default) or background (Modus).
-      ;; Fade both halfway toward the editor background.
-      (let ((lighter (list :inherit face))
-            (base (color-name-to-rgb
-                   (let ((bg (face-background 'default nil t)))
-                     (if (and bg (color-defined-p bg)) bg "white")))))
-        (dolist (attribute '(:foreground :background))
-          (let ((color (face-attribute face attribute nil t)))
-            (when (and (stringp color) (color-defined-p color))
-              (setq lighter
-                    (plist-put lighter attribute
-                               (apply #'color-rgb-to-hex
-                                      (append (color-blend (color-name-to-rgb color)
-                                                           base 0.5)
-                                              '(2))))))))
-        (setq face lighter)))
+      ;; Fade the background 75% toward the editor background, unless the
+      ;; staged face sets its own.  Letters keep the staged face's color.
+      (let ((color (face-background face nil t))
+            (base (face-background 'default nil t)))
+        (when (and (stringp color) (color-defined-p color)
+                   (not (stringp (face-attribute face :background))))
+          (setq face
+                (list :inherit face
+                      :background
+                      (apply #'color-rgb-to-hex
+                             (append (color-blend
+                                      (color-name-to-rgb color)
+                                      (color-name-to-rgb
+                                       (if (and base (color-defined-p base)) base "white"))
+                                      0.25)
+                                     '(2))))))))
     (when (get-text-property 0 'face sign)
       (setq face (append
                   (get-text-property 0 'face sign)

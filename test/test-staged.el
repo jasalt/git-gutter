@@ -110,3 +110,30 @@
             (should (stringp (plist-get face :background)))
             (should-not (equal (plist-get face :background) "#6cc06c"))))
       (face-spec-set 'git-gutter:added spec))))
+
+(ert-deftest git-gutter:staged-sign-keeps-letter-color ()
+  "Only the background is faded; letters keep their color."
+  (let ((spec (get 'git-gutter:added 'face-defface-spec)))
+    (unwind-protect
+        (progn
+          (set-face-attribute 'git-gutter:added nil
+                              :foreground "#123456" :background "#6cc06c")
+          (let ((face (get-text-property 0 'face (git-gutter:propertized-sign 'added t))))
+            (should-not (plist-get face :foreground))
+            (should (stringp (plist-get face :background)))))
+      (face-spec-set 'git-gutter:added spec))))
+
+(ert-deftest git-gutter:staged-face-color-is-not-faded ()
+  "A color set on a staged face itself is used unchanged."
+  (let ((spec (get 'git-gutter:added 'face-defface-spec)))
+    (unwind-protect
+        (progn
+          (set-face-attribute 'git-gutter:added nil :background "#6cc06c")
+          (set-face-foreground 'git-gutter:staged-added "white")
+          (let ((face (get-text-property 0 'face (git-gutter:propertized-sign 'added t))))
+            (should-not (plist-get face :foreground))
+            (should (eq (plist-get face :inherit) 'git-gutter:staged-added))
+            (should (stringp (plist-get face :background)))
+            (should-not (equal (plist-get face :background) "#6cc06c"))))
+      (set-face-foreground 'git-gutter:staged-added 'unspecified)
+      (face-spec-set 'git-gutter:added spec))))
